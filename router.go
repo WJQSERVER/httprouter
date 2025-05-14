@@ -712,7 +712,11 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 				// 调用路由处理程序。
 				// 这里传递 *ps (Params 切片的值)，无论是 httprouter.Handle 还是 http.Handler 适配器都能正确处理。
-				handle(w, req, *ps)
+				if ps == nil {
+					handle(w, req, nil)
+				} else {
+					handle(w, req, *ps)
+				}
 
 				// 请求处理完成
 				return
