@@ -195,16 +195,19 @@ type Router struct {
 	// 在调用处理程序之前会设置包含允许请求方法的 "Allow" 头部。
 	MethodNotAllowed http.Handler
 
-	// 处理从 http 处理程序恢复的 panic 的函数。
-	// 应用于生成错误页面并返回 http 错误码 500 (Internal Server Error)。
-	// 此处理程序可用于防止您的服务器因未恢复的 panic 而崩溃。
-	PanicHandler func(http.ResponseWriter, *http.Request, interface{})
-
 	// RecoveryHandler 是处理从 http 处理程序（包括中间件和路由处理程序）恢复的 panic 的函数。
 	// 如果设置，当 panic 发生并被恢复时，会调用此函数。
 	// 它接收原始的 ResponseWriter、Request 和 panic 的值 (interface{})。
 	// 如果未设置，则 panic 会继续传播（回到 net/http 的 ServeHTTP，可能导致连接关闭）。
 	RecoveryHandler RecoveryHandlerFunc
+
+	// FileSystemForUnmatched 用于在没有匹配到预定义路由时服务静态文件。
+	// 如果设置且 ServeUnmatchedAsStatic 为 true，则未匹配路由将尝试在此文件系统中查找文件。
+	FileSystemForUnmatched http.FileSystem
+
+	// ServeUnmatchedAsStatic 如果启用，则将所有未匹配的路由尝试作为静态文件处理，
+	// 使用 FileSystemForUnmatched 指定的文件系统。
+	ServeUnmatchedAsStatic bool
 }
 
 // 确保 Router 符合 http.Handler 接口
@@ -565,6 +568,13 @@ func (r *Router) ServeFiles(path string, root http.FileSystem) {
 	})
 }
 
+// ServeUnmatched 配置路由器将所有未匹配的路由尝试作为静态文件处理。
+// fs 指定了静态文件的根目录。
+func (r *Router) ServeUnmatched(fs http.FileSystem) {
+	r.FileSystemForUnmatched = fs
+	r.ServeUnmatchedAsStatic = true
+}
+
 func (r *Router) recv(w http.ResponseWriter, req *http.Request) {
 	if rcv := recover(); rcv != nil {
 		if r.RecoveryHandler != nil {
@@ -768,6 +778,13 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				}
 				return
 			}
+		}
+
+		// 处理不定路由
+		if r.ServeUnmatchedAsStatic && r.FileSystemForUnmatched != nil {
+			fileServer := http.FileServer(r.FileSystemForUnmatched)
+			fileServer.ServeHTTP(w, req)
+			return
 		}
 
 		// 处理 404 Not Found
