@@ -146,6 +146,25 @@ type Middleware func(http.Handler) http.Handler
 // RecoveryHandlerFunc 定义了处理从 panic 中恢复的函数的签名。
 type RecoveryHandlerFunc func(http.ResponseWriter, *http.Request, interface{})
 
+// ErrorHandlerFunc 定义了处理HTTP错误的函数的签名。
+// 它接收状态码以及标准的ResponseWriter和Request。
+type ErrorHandlerFunc func(w http.ResponseWriter, r *http.Request, statusCode int)
+
+// defaultErrorHandler 是一个默认的 ErrorHandlerFunc 实现。
+// 它简单地使用 http.Error 来发送带有状态码和相应文本的响应。
+func defaultErrorHandler(w http.ResponseWriter, r *http.Request, statusCode int) {
+	// 在写入响应之前检查客户端是否已断开连接
+	select {
+	case <-r.Context().Done():
+		// 如果客户端已断开连接，则不执行任何操作（或仅记录日志）
+		// log.Printf("client disconnected before error %d could be sent for %s", statusCode, r.URL.Path)
+		return
+	default:
+		// http.Error 会设置 Content-Type 和状态码，并写入消息体。
+		http.Error(w, http.StatusText(statusCode), statusCode)
+	}
+}
+
 // Router 是一个 http.Handler，可用于通过可配置的路由将请求分派到不同的处理程序函数。
 type Router struct {
 	trees map[string]*node
@@ -214,6 +233,13 @@ type Router struct {
 	// ServeUnmatchedAsStatic 如果启用，则将所有未匹配的路由尝试作为静态文件处理，
 	// 使用 FileSystemForUnmatched 指定的文件系统。
 	ServeUnmatchedAsStatic bool
+
+	// ErrorHandler 是一个统一的错误处理函数。
+	// 当 NotFound 或 MethodNotAllowed 为 nil 时，或者在 panic 恢复且 RecoveryHandler 为 nil 时，
+	// 此函数将被调用来处理错误。
+	// 默认为 defaultErrorHandler，它使用 http.Error。
+	errorHandler              ErrorHandlerFunc
+	isDefaultErrorHandlerUsed bool
 }
 
 // 确保 Router 符合 http.Handler 接口
@@ -222,19 +248,56 @@ var _ http.Handler = New()
 // New 返回一个新的初始化 Router。
 // 路径自动更正，包括尾部斜杠，默认启用。
 func New() *Router {
-	return &Router{
+	r := &Router{
 		RedirectTrailingSlash:  true,
 		RedirectFixedPath:      true,
 		HandleMethodNotAllowed: true,
 		HandleOPTIONS:          true,
 		Middlewares:            make([]Middleware, 0),
 	}
+	r.setDefaultErrorHandler()
+	return r
+}
+
+// setDefaultErrorHandler 将路由器的错误处理器设置为默认实现。
+func (r *Router) setDefaultErrorHandler() {
+	r.errorHandler = defaultErrorHandler
+	r.isDefaultErrorHandlerUsed = true
+}
+
+// SetErrorHandler 允许用户设置自定义的错误处理函数。
+// 如果传入 nil，则会恢复为默认的错误处理函数。
+func (r *Router) SetErrorHandler(handler ErrorHandlerFunc) {
+	if handler == nil {
+		r.setDefaultErrorHandler()
+	} else {
+		r.errorHandler = handler
+		r.isDefaultErrorHandlerUsed = false
+	}
+}
+
+// GetErrorHandler 返回当前配置的错误处理函数。
+// 注意：直接比较返回的函数与 defaultErrorHandler 可能不可靠。
+// 请使用 Router.IsUsingDefaultErrorHandler() 来检查是否正在使用默认处理器。
+func (r *Router) GetErrorHandler() ErrorHandlerFunc {
+	return r.errorHandler
+}
+
+// 返回默认errhandle
+func (r *Router) GetDefaultErrHandler() ErrorHandlerFunc {
+	return defaultErrorHandler
+}
+
+// IsUsingDefaultErrorHandler 返回 true 如果当前路由器正在使用默认的错误处理器。
+func (r *Router) IsUsingDefaultErrorHandler() bool {
+	return r.isDefaultErrorHandlerUsed
 }
 
 // Group 代表一个路由组，具有一个路径前缀。
 type Group struct {
-	router *Router // 指向主 Router
-	prefix string  // 该组的路径前缀
+	router      *Router      // 指向主 Router
+	prefix      string       // 该组的路径前缀
+	middlewares []Middleware // group级中间件
 }
 
 // Group 创建一个新的路由组，所有通过该组注册的路由都将带有给定的路径前缀。
@@ -320,6 +383,23 @@ func (r *Router) Use(middleware ...Middleware) {
 	r.Middlewares = append(r.Middlewares, middleware...)
 }
 
+// HTTP method shortcuts
+func (r *Router) GET(path string, handle Handle)     { r.Handle(http.MethodGet, path, handle) }
+func (r *Router) HEAD(path string, handle Handle)    { r.Handle(http.MethodHead, path, handle) }
+func (r *Router) OPTIONS(path string, handle Handle) { r.Handle(http.MethodOptions, path, handle) }
+func (r *Router) POST(path string, handle Handle)    { r.Handle(http.MethodPost, path, handle) }
+func (r *Router) PUT(path string, handle Handle)     { r.Handle(http.MethodPut, path, handle) }
+func (r *Router) PATCH(path string, handle Handle)   { r.Handle(http.MethodPatch, path, handle) }
+func (r *Router) DELETE(path string, handle Handle)  { r.Handle(http.MethodDelete, path, handle) }
+func (r *Router) Get(path string, handle Handle)     { r.Handle(http.MethodGet, path, handle) }
+func (r *Router) Head(path string, handle Handle)    { r.Handle(http.MethodHead, path, handle) }
+func (r *Router) Options(path string, handle Handle) { r.Handle(http.MethodOptions, path, handle) }
+func (r *Router) Post(path string, handle Handle)    { r.Handle(http.MethodPost, path, handle) }
+func (r *Router) Put(path string, handle Handle)     { r.Handle(http.MethodPut, path, handle) }
+func (r *Router) Patch(path string, handle Handle)   { r.Handle(http.MethodPatch, path, handle) }
+func (r *Router) Delete(path string, handle Handle)  { r.Handle(http.MethodDelete, path, handle) }
+
+/*
 // GET 是 router.Handle(http.MethodGet, path, handle) 的快捷方式
 func (r *Router) GET(path string, handle Handle) {
 	r.Handle(http.MethodGet, path, handle)
@@ -390,6 +470,7 @@ func (r *Router) Patch(path string, handle Handle) {
 func (r *Router) Delete(path string, handle Handle) {
 	r.Handle(http.MethodDelete, path, handle)
 }
+*/
 
 // DefaultMethodsForAny 定义了 ANY 方法将注册的 HTTP 方法列表
 var DefaultMethodsForAny = []string{
@@ -412,74 +493,92 @@ func (r *Router) ANY(path string, handle Handle) {
 
 // --- 定义group方式 ---
 
-// Handle 是 Group 的 router.Handle 的快捷方式
-func (g *Group) Handle(method, path string, handle Handle) {
-	// 将组前缀添加到路径，确保路径正确拼接
-	// 如果 path 为空或已经是 "/"，则直接使用组前缀
-	// 如果 path 以 "/" 开头，则直接拼接
-	// 否则，在组前缀和 path 之间添加 "/"
-	fullPath := g.prefix
-	if path != "" && path != "/" {
-		if path[0] == '/' {
-			// 如果g.prefix是"/"，避免出现"//path"
-			if g.prefix == "/" {
-				fullPath = path
-			} else {
-				fullPath += path
-			}
-		} else {
-			// 如果g.prefix是"/"，避免出现"//path"
-			if g.prefix == "/" {
-				fullPath += path
-			} else {
-				fullPath += "/" + path
-			}
-		}
-	} else if path == "/" && g.prefix != "/" {
-		// 如果路径是 "/" 且组前缀不是 "/" (例如 /admin), 结果应该是 /admin/
-		// 但我们的 Handle 通常期望路径不以斜杠结尾，除非是根路径
-		// 为了与 router.Handle 的行为一致，这里可能需要调整
-		// 保持现状： /admin + / -> /admin/ (如果路由允许)
-		// 或者确保 fullPath 总是规范的： /admin (如果 path 是 /)
-		// 当前 julienschmidt/httprouter 对于 /foo/ 和 /foo 有重定向逻辑
-		// 这里我们简单拼接，让底层的 AddRoute 处理
-		if g.prefix != "/" { // 避免 //
-			fullPath += "/"
-		}
-	} else if path == "" && g.prefix == "/" {
-		// 如果组前缀是 "/" 且 path 是 "", fullPath 应该是 "/"
-		fullPath = "/"
+// --- applyGroupMiddlewares 辅助函数 ---
+// applyGroupMiddlewares 将组的中间件应用于一个 httprouter.Handle。
+// 它返回一个新的 httprouter.Handle，该 Handle 在执行时会首先运行组中间件链。
+func applyGroupMiddlewares(middlewares []Middleware, targetHandle Handle) Handle {
+	if len(middlewares) == 0 {
+		return targetHandle // 没有组中间件，直接返回原 Handle
 	}
 
+	// 1. 将 httprouter.Handle 适配为 http.Handler，以便标准的中间件可以应用。
+	//    这个适配的 http.Handler 在被调用时，需要能够执行原始的 targetHandle，
+	//    并且能够传递 httprouter.Params。由于 Params 是在最外层 ServeHTTP 中解析的，
+	//    并且通过第三个参数传递给 httprouter.Handle，我们需要一种方式将这些 Params
+	//    传递给适配后的 targetHandle。
+	//    我们将通过闭包来捕获 Params。
+	adaptedHandlerFunc := func(ps Params) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			targetHandle(w, r, ps)
+		}
+	}
+
+	// 2. 构建最终的 httprouter.Handle，它在被调用时会执行中间件链。
+	return func(w http.ResponseWriter, r *http.Request, ps Params) {
+		// 获取为当前参数 ps 适配的 http.Handler
+		handlerToWrap := adaptedHandlerFunc(ps)
+
+		// 应用组中间件 (从后往前构建调用链，类似 Router.applyMiddleware)
+		var current http.Handler = handlerToWrap
+		for i := len(middlewares) - 1; i >= 0; i-- {
+			current = middlewares[i](current)
+		}
+
+		// 执行被组中间件包裹的处理器
+		current.ServeHTTP(w, r)
+	}
+}
+
+// internal helper to join group prefix with relative path
+func joinGroupPath(prefix, relativePath string) string {
+	if prefix == "/" {
+		if relativePath == "" {
+			return "/"
+		}
+		if relativePath[0] == '/' {
+			return relativePath
+
+		}
+		return "/" + relativePath
+	}
+	if relativePath == "" {
+		return prefix
+	}
+	if relativePath == "/" {
+		return prefix + "/"
+	}
+	if relativePath[0] == '/' {
+		return prefix + relativePath
+	}
+	return prefix + "/" + relativePath
+}
+
+// Handle 是 Group 的 router.Handle 的快捷方式
+func (g *Group) Handle(method, relativePath string, handle Handle) {
+
 	// 调用主 Router 的 Handle 方法
-	g.router.Handle(method, fullPath, handle)
+	finalHandle := applyGroupMiddlewares(g.middlewares, handle)
+	g.router.Handle(method, joinGroupPath(g.prefix, relativePath), finalHandle)
 }
 
 // Handler 是 Group 的 router.Handler 的快捷方式
-func (g *Group) Handler(method, path string, handler http.Handler) {
-	fullPath := g.prefix
-	if path != "" && path != "/" {
-		if path[0] == '/' {
-			if g.prefix == "/" {
-				fullPath = path
-			} else {
-				fullPath += path
-			}
-		} else {
-			if g.prefix == "/" {
-				fullPath += path
-			} else {
-				fullPath += "/" + path
-			}
+func (g *Group) Handler(method, relativePath string, handler http.Handler) {
+	// 1. 创建一个 httprouter.Handle 来包装原始的 http.Handler
+	//    这个 Handle 的作用是将 router 解析的 Params 放入上下文中。
+	intermediateHandle := func(w http.ResponseWriter, r *http.Request, p Params) {
+		if len(p) > 0 {
+			ctx := r.Context()
+			ctx = context.WithValue(ctx, ParamsKey, p)
+			r = r.WithContext(ctx)
 		}
-	} else if path == "/" && g.prefix != "/" {
-		if g.prefix != "/" {
-			fullPath += "/"
-		}
-	} else if path == "" && g.prefix == "/" {
-		fullPath = "/"
+		handler.ServeHTTP(w, r)
 	}
-	g.router.Handler(method, fullPath, handler)
+
+	// 2. 应用组中间件到这个 intermediateHandle 上
+	finalHandle := applyGroupMiddlewares(g.middlewares, intermediateHandle)
+
+	// 3. 注册最终的、被组中间件包裹的 Handle
+	g.router.Handle(method, joinGroupPath(g.prefix, relativePath), finalHandle)
 }
 
 // HandlerFunc 是 Group 的 router.HandlerFunc 的快捷方式
@@ -510,107 +609,77 @@ func (g *Group) HandlerFunc(method, path string, handler http.HandlerFunc) {
 }
 
 // ServeFiles 是 Group 的 router.ServeFiles 的快捷方式
-func (g *Group) ServeFiles(path string, root http.FileSystem) {
-	// 验证路径
-	if len(path) < 10 || path[len(path)-10:] != "/*filepath" {
-		panic("path must end with /*filepath in path '" + path + "'")
+func (g *Group) ServeFiles(relativePath string, root http.FileSystem) {
+	if len(relativePath) < 10 || relativePath[len(relativePath)-10:] != "/*filepath" {
+		panic("path for ServeFiles must end with /*filepath in path '" + relativePath + "'")
 	}
-	fullPath := g.prefix
-	if path != "" && path != "/" { // path for ServeFiles must start with /
-		if path[0] == '/' {
-			if g.prefix == "/" {
-				fullPath = path
-			} else {
-				fullPath += path
-			}
-		} else { // Should not happen if path starts with /*filepath
-			if g.prefix == "/" {
-				fullPath += path
-			} else {
-				fullPath += "/" + path
-			}
+
+	fileServer := http.FileServer(root)
+
+	// 创建一个 httprouter.Handle 来服务文件
+	fileServeHandle := func(w http.ResponseWriter, req *http.Request, ps Params) {
+		originalPath := req.URL.Path
+		req.URL.Path = ps.ByName("filepath") // 从 Params 中获取实际文件路径
+		if len(ps) > 0 {                     // 将 Params 放入上下文，以保持一致性
+			ctx := req.Context()
+			ctx = context.WithValue(ctx, ParamsKey, ps)
+			req = req.WithContext(ctx)
 		}
+		fileServer.ServeHTTP(w, req)
+		req.URL.Path = originalPath // 恢复原始路径
 	}
-	// 调用主 Router 的 ServeFiles 方法
-	g.router.ServeFiles(fullPath, root)
+
+	// 应用组中间件到这个 fileServeHandle
+	finalFileServeHandle := applyGroupMiddlewares(g.middlewares, fileServeHandle)
+
+	// 注册这个被包裹的 Handle
+	g.router.Handle(http.MethodGet, joinGroupPath(g.prefix, relativePath), finalFileServeHandle)
 }
 
-// Use 是 Group 的 router.Use 的快捷方式 (全局中间件，对组别使用可能引起误解，但保持原样)
-// 注意: Use 在原始 httprouter 中是全局的。Group 上的 Use 仍然是添加全局中间件。
-// 如果需要组级别的中间件，需要不同的设计。
 func (g *Group) Use(middleware ...Middleware) {
-	g.router.Use(middleware...)
+	g.middlewares = append(g.middlewares, middleware...)
 }
-
-// GET 是 Group 的 router.GET 的快捷方式
-func (g *Group) GET(path string, handle Handle) {
-	g.Handle(http.MethodGet, path, handle)
+func (g *Group) GET(relativePath string, handle Handle) {
+	g.Handle(http.MethodGet, relativePath, handle)
 }
-
-// HEAD 是 Group 的 router.HEAD 的快捷方式
-func (g *Group) HEAD(path string, handle Handle) {
-	g.Handle(http.MethodHead, path, handle)
+func (g *Group) HEAD(relativePath string, handle Handle) {
+	g.Handle(http.MethodHead, relativePath, handle)
 }
-
-// OPTIONS 是 Group 的 router.OPTIONS 的快捷方式
-func (g *Group) OPTIONS(path string, handle Handle) {
-	g.Handle(http.MethodOptions, path, handle)
+func (g *Group) OPTIONS(relativePath string, handle Handle) {
+	g.Handle(http.MethodOptions, relativePath, handle)
 }
-
-// POST 是 Group 的 router.POST 的快捷方式
-func (g *Group) POST(path string, handle Handle) {
-	g.Handle(http.MethodPost, path, handle)
+func (g *Group) POST(relativePath string, handle Handle) {
+	g.Handle(http.MethodPost, relativePath, handle)
 }
-
-// PUT 是 Group 的 router.PUT 的快捷方式
-func (g *Group) PUT(path string, handle Handle) {
-	g.Handle(http.MethodPut, path, handle)
+func (g *Group) PUT(relativePath string, handle Handle) {
+	g.Handle(http.MethodPut, relativePath, handle)
 }
-
-// PATCH 是 Group 的 router.PATCH 的快捷方式
-func (g *Group) PATCH(path string, handle Handle) {
-	g.Handle(http.MethodPatch, path, handle)
+func (g *Group) PATCH(relativePath string, handle Handle) {
+	g.Handle(http.MethodPatch, relativePath, handle)
 }
-
-// DELETE 是 Group 的 router.DELETE 的快捷方式
-func (g *Group) DELETE(path string, handle Handle) {
-	g.Handle(http.MethodDelete, path, handle)
+func (g *Group) DELETE(relativePath string, handle Handle) {
+	g.Handle(http.MethodDelete, relativePath, handle)
 }
-
-// 支持对应Get Put等书写方法作为GET PUT的同名入口
-// Get 是 Group 的 router.Get 的快捷方式
-func (g *Group) Get(path string, handle Handle) {
-	g.Handle(http.MethodGet, path, handle)
+func (g *Group) Get(relativePath string, handle Handle) {
+	g.Handle(http.MethodGet, relativePath, handle)
 }
-
-// Head 是 Group 的 router.Head 的快捷方式
-func (g *Group) Head(path string, handle Handle) {
-	g.Handle(http.MethodHead, path, handle)
+func (g *Group) Head(relativePath string, handle Handle) {
+	g.Handle(http.MethodHead, relativePath, handle)
 }
-
-// Options 是 Group 的 router.Options 的快捷方式
-func (g *Group) Options(path string, handle Handle) {
-	g.Handle(http.MethodOptions, path, handle)
+func (g *Group) Options(relativePath string, handle Handle) {
+	g.Handle(http.MethodOptions, relativePath, handle)
 }
-
-// Post 是 Group 的 router.Post 的快捷方式
-func (g *Group) Post(path string, handle Handle) {
-	g.Handle(http.MethodPost, path, handle)
+func (g *Group) Post(relativePath string, handle Handle) {
+	g.Handle(http.MethodPost, relativePath, handle)
 }
-
-// Put 是 Group 的 router.Put 的快捷方式
-func (g *Group) Put(path string, handle Handle) {
-	g.Handle(http.MethodPut, path, handle)
+func (g *Group) Put(relativePath string, handle Handle) {
+	g.Handle(http.MethodPut, relativePath, handle)
 }
-
-// Patch 是 Group 的 router.Patch 的快捷方式
-func (g *Group) Patch(path string, handle Handle) {
-	g.Handle(http.MethodPatch, path, handle)
+func (g *Group) Patch(relativePath string, handle Handle) {
+	g.Handle(http.MethodPatch, relativePath, handle)
 }
-
-// Delete 是 Group 的 router.Delete 的快捷方式
-func (g *Group) Delete(path string, handle Handle) {
-	g.Handle(http.MethodDelete, path, handle)
+func (g *Group) Delete(relativePath string, handle Handle) {
+	g.Handle(http.MethodDelete, relativePath, handle)
 }
 
 // ANY 为组内路径注册一个处理所有 DefaultMethodsForAny 中定义的方法的 Handler。
@@ -768,9 +837,6 @@ func (r *Router) recv(w http.ResponseWriter, req *http.Request) {
 				// 传递一个标记或者修改 ResponseWriter 以阻止写入
 				// 或者让 RecoveryHandler 自行检查 ctx.Done()
 				r.RecoveryHandler(w, req, rcv)
-			} else {
-				// 默认行为，但可能因连接已关闭而失败
-				// http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			}
 			return // 避免在已关闭的连接上写入
 		default:
@@ -778,8 +844,10 @@ func (r *Router) recv(w http.ResponseWriter, req *http.Request) {
 
 		if r.RecoveryHandler != nil {
 			r.RecoveryHandler(w, req, rcv)
+		} else if r.errorHandler != nil { // 使用统一的错误处理器处理 panic
+			r.errorHandler(w, req, http.StatusInternalServerError)
 		} else {
-			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			defaultErrorHandler(w, req, http.StatusInternalServerError)
 		}
 	}
 }
@@ -956,11 +1024,10 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				writer.Header().Set("Allow", allow)
 				if r.MethodNotAllowed != nil {
 					r.MethodNotAllowed.ServeHTTP(writer, request)
+				} else if r.errorHandler != nil {
+					r.errorHandler(writer, request, http.StatusMethodNotAllowed)
 				} else {
-					http.Error(writer,
-						http.StatusText(http.StatusMethodNotAllowed),
-						http.StatusMethodNotAllowed,
-					)
+					defaultErrorHandler(writer, request, http.StatusMethodNotAllowed)
 				}
 				return
 			}
@@ -981,14 +1048,28 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			// 对于客户端断开连接，如果写入时间很长，TCP/IP 层会处理，写入会失败。
 			// 对 fileServer.ServeHTTP 的调用，其内部的 io.Copy 会在写入失败时中止。
 			// req.Context().Done() 主要用于应用层取消长时间操作。
-			fileServer.ServeHTTP(writer, request)
+			//fileServer.ServeHTTP(writer, request)
+
+			if !r.isDefaultErrorHandlerUsed { // 使用布尔标记判断
+				// 用户设置了自定义错误处理器
+				// 传递 r.errorHandler 给包装器
+				ecw := newErrorCapturingResponseWriter(writer, request, r.errorHandler)
+				fileServer.ServeHTTP(ecw, request)
+				ecw.processAfterFileServer()
+			} else {
+				// 用户使用的是默认错误处理器
+				fileServer.ServeHTTP(writer, request)
+			}
 			return
 		}
 
 		if r.NotFound != nil {
 			r.NotFound.ServeHTTP(writer, request)
+		} else if r.errorHandler != nil {
+			r.errorHandler(writer, request, http.StatusNotFound)
 		} else {
-			http.NotFound(writer, request)
+			defaultErrorHandler(writer, request, http.StatusNotFound)
+			//http.NotFound(writer, request)
 		}
 	}) // coreRoutingAndHandling http.HandlerFunc 结束
 
